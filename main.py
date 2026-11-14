@@ -230,7 +230,7 @@ def evaluate(b, side):
             t = abs(p)
             sgn = 1 if p > 0 else -1
             idx = i if p > 0 else (7 - i // 8) * 8 + i % 8
-            tt = 6 if (t == K and eg) else t
+            tt = (6 if eg else 5) if t == K else t - 1
             sc += sgn * (V[t] + T[tt * 64 + idx] - 128)
     if bishops[0] > 1:
         sc += 20
