@@ -1,26 +1,31 @@
-"""tiny-chess-01 engine (development source; shipped packed into main.py).
+"""tiny-chess-01 engine v4: piece-square tables, null move, LMR, killers and quiescence.
 
-Board: 64-int list, a1=0, white pieces positive (1 P, 2 N, 3 B, 4 R, 5 Q, 6 K), black negative.
-Search: iterative deepening alpha-beta with quiescence, fixed node budget, never a clock.
+Board: 64-int list, a1=0, white positive. Tables are 448 signed bytes, offset by 128, base64.
 """
 
 import json
 import os
 import sys
 import urllib.request
+from base64 import b64decode as bd
 
 P, N, B, R, Q, K = 1, 2, 3, 4, 5, 6
 V = (0, 100, 320, 330, 500, 900, 0)
 MATE = 30000
-LIMIT = 120000
+LIMIT = 60000
 KN = (17, 15, 10, 6, -6, -10, -15, -17)
 KG = (9, 8, 7, 1, -1, -7, -8, -9)
 DIAG = ((1, 1), (1, -1), (-1, 1), (-1, -1))
 ORTH = ((1, 0), (-1, 0), (0, 1), (0, -1))
 ALL = DIAG + ORTH
 FILES = "abcdefgh"
-
+# pawn, knight, bishop, rook, queen, king middle, king end: a1 first, each value + 128
+T = bd(
+    "gICAgICAgICFiopsbIqKhYV7doCAdnuFgICAlJSAgICFhYqZmYqFhYqKlJ6elIqKsrKysrKysrKAgICAgICAgE5YYmJiYlhOWGyAhYWAbFhihYqPj4qFYmKAj5SUj4BiYoWPlJSPhWJigIqPj4qAYlhsgICAgGxYTlhiYmJiWE5sdnZ2dnZ2bHaFgICAgIV2doqKioqKinZ2gIqKioqAdnaFhYqKhYV2doCFioqFgHZ2gICAgICAdmx2dnZ2dnZsgICAhYWAgIB7gICAgICAe3uAgICAgIB7e4CAgICAgHt7gICAgICAe3uAgICAgIB7hYqKioqKioWAgICAgICAgGx2dnt7dnZsdoCFgICAgHZ2hYWFhYWAdoCAhYWFhYB7e4CFhYWFgHt2gIWFhYWAdnaAgICAgIB2bHZ2e3t2dmyUnoqAgIqelJSUgICAgJSUdmxsbGxsbHZsYmJYWGJibGJYWE5OWFhiYlhYTk5YWGJiWFhOTlhYYmJYWE5OWFhiTmJiYmJiYk5iYoCAgIBiYmJ2lJ6elHZiYnaeqKiedmJidp6oqJ52YmJ2lJ6elHZiYmx2gIB2bGJOWGJsbGJYTg=="
+)
 nodes = 0
+KILL = [[None, None] for _ in range(64)]
+HIST = [[0] * 64 for _ in range(64)]
 
 
 class Cut(Exception):
@@ -140,10 +145,7 @@ def gen(b, side, cast, ep, caps=False):
                         tgt = nr * 8 + nf
                         q = b[tgt]
                         if q * side < 0:
-                            if nr in (0, 7):
-                                out.append((i, tgt, 5))
-                            else:
-                                out.append((i, tgt, 0))
+                            out.append((i, tgt, 5 if nr in (0, 7) else 0))
                         elif tgt == ep:
                             out.append((i, tgt, 0))
         elif t == N or t == K:
@@ -169,14 +171,14 @@ def gen(b, side, cast, ep, caps=False):
                     rr += dr
     if not caps:
         if side > 0:
-            if cast & 1 and b[5] == 0 and b[6] == 0 and b[4] == K and not attacked(b, 4, -1) and not attacked(b, 5, -1):
+            if cast & 1 and b[5] == 0 and b[6] == 0 and not attacked(b, 4, -1) and not attacked(b, 5, -1):
                 out.append((4, 6, 0))
-            if cast & 2 and b[3] == 0 and b[2] == 0 and b[1] == 0 and b[4] == K and not attacked(b, 4, -1) and not attacked(b, 3, -1):
+            if cast & 2 and b[3] == 0 and b[2] == 0 and b[1] == 0 and not attacked(b, 4, -1) and not attacked(b, 3, -1):
                 out.append((4, 2, 0))
         else:
-            if cast & 4 and b[61] == 0 and b[62] == 0 and b[60] == -K and not attacked(b, 60, 1) and not attacked(b, 61, 1):
+            if cast & 4 and b[61] == 0 and b[62] == 0 and not attacked(b, 60, 1) and not attacked(b, 61, 1):
                 out.append((60, 62, 0))
-            if cast & 8 and b[59] == 0 and b[58] == 0 and b[57] == 0 and b[60] == -K and not attacked(b, 60, 1) and not attacked(b, 59, 1):
+            if cast & 8 and b[59] == 0 and b[58] == 0 and b[57] == 0 and not attacked(b, 60, 1) and not attacked(b, 59, 1):
                 out.append((60, 58, 0))
     return out
 
@@ -206,79 +208,55 @@ def child(b, m, side, cast, ep):
         else:
             nb[f - 1] = nb[f - 4]
             nb[f - 4] = 0
-    return nb, -side, nc, ne, cap
-
-
-def piece_sq(t, i, eg):
-    f, r = i % 8, i // 8
-    c = abs(f - 3.5) + abs(r - 3.5)
-    if t == P:
-        return r * 9 + (0, 0, 5, 10, 10, 5, 0, 0)[f]
-    if t == N:
-        return int(34 - 8 * c)
-    if t == B:
-        return int(24 - 5 * c)
-    if t == R:
-        return (r - 3) * 2 + (6 if r == 6 else 0)
-    if t == Q:
-        return int(12 - 3 * c)
-    if eg:
-        return int(24 - 6 * c)
-    return int(26 - 10 * c) if r > 0 else 10
+    return nb, -side, nc, ne
 
 
 def evaluate(b, side):
     sc = 0
     mat = 0
     bishops = [0, 0]
-    counts = [0, 0]
-    pawns = [[0] * 8, [0] * 8]
     for i in range(64):
         p = b[i]
-        if not p:
-            continue
-        t = abs(p)
-        sgn = 1 if p > 0 else -1
-        if t != P and t != K:
-            mat += V[t]
-        if t == B:
-            bishops[0 if p > 0 else 1] += 1
-        if t == P:
-            pawns[0 if p > 0 else 1][i % 8] += 1
-        counts[0 if p > 0 else 1] += 1
-    eg = mat < 1600
+        if p:
+            t = abs(p)
+            if t == B:
+                bishops[0 if p > 0 else 1] += 1
+            if t != P and t != K:
+                mat += V[t]
+    eg = mat < 1500
     for i in range(64):
         p = b[i]
         if p:
             t = abs(p)
             sgn = 1 if p > 0 else -1
-            sqi = i if p > 0 else (7 - i // 8) * 8 + i % 8
-            sc += sgn * (V[t] + piece_sq(t, sqi, eg))
+            idx = i if p > 0 else (7 - i // 8) * 8 + i % 8
+            tt = 6 if (t == K and eg) else t
+            sc += sgn * (V[t] + T[tt * 64 + idx] - 128)
     if bishops[0] > 1:
-        sc += 24
+        sc += 20
     if bishops[1] > 1:
-        sc -= 24
-    for col in (0, 1):
-        sgn = 1 if col == 0 else -1
-        for f in range(8):
-            n = pawns[col][f]
-            if n > 1:
-                sc -= sgn * 14 * (n - 1)
-            if n and not (f and pawns[col][f - 1]) and not (f < 7 and pawns[col][f + 1]):
-                sc -= sgn * 12
+        sc -= 20
     return sc * side + 4
 
 
-def order(b, moves):
+def order(b, moves, ply):
+    killers = KILL[ply]
+
     def key(m):
-        t = m[1]
-        victim = b[t]
+        victim = b[m[1]]
         score = 0
         if victim:
             score = 10 * V[abs(victim)] - V[abs(b[m[0]])]
         if m[2]:
             score += 800
+        if m == killers[0]:
+            score += 700
+        elif m == killers[1]:
+            score += 600
+        elif not victim:
+            score += HIST[m[0]][m[1]]
         return -score
+
     moves.sort(key=key)
     return moves
 
@@ -299,14 +277,12 @@ def qs(b, side, cast, ep, alpha, beta, ply):
             alpha = stand
     if check and ply > 4:
         return evaluate(b, side)
-    moves = order(b, gen(b, side, cast, ep, not check))
+    moves = order(b, gen(b, side, cast, ep, not check), ply)
     for m in moves:
         victim = b[m[1]]
         if not check and not victim and not m[2]:
             continue
-        if not check and victim and evaluate(b, side) + V[abs(victim)] + 150 < alpha:
-            continue
-        nb, ns, nc, ne, cap = child(b, m, side, cast, ep)
+        nb, ns, nc, ne = child(b, m, side, cast, ep)
         if attacked(nb, king_sq(nb, side), -side):
             continue
         v = -qs(nb, ns, nc, ne, -beta, -alpha, ply + 1)
@@ -317,7 +293,7 @@ def qs(b, side, cast, ep, alpha, beta, ply):
     return alpha
 
 
-def ab(b, side, cast, ep, depth, alpha, beta, ply):
+def ab(b, side, cast, ep, depth, alpha, beta, ply, nulled=False):
     global nodes
     nodes += 1
     if nodes > LIMIT:
@@ -326,40 +302,71 @@ def ab(b, side, cast, ep, depth, alpha, beta, ply):
         return evaluate(b, side)
     if depth <= 0:
         return qs(b, side, cast, ep, alpha, beta, ply)
-    moves = order(b, gen(b, side, cast, ep))
+    in_check = attacked(b, king_sq(b, side), -side)
+    if not in_check and not nulled and depth >= 3 and ep < 0:
+        if any(abs(p) not in (P, K) and p * side > 0 for p in b):
+            v = -ab(b, -side, cast, -1, depth - 3, -beta, -beta + 1, ply + 1, True)
+            if v >= beta:
+                return beta
+    moves = order(b, gen(b, side, cast, ep), ply)
+    static = evaluate(b, side) if depth == 1 and not in_check else None
     legal = 0
     best = -MATE
+    index = 0
+    searched = 0
     for m in moves:
-        nb, ns, nc, ne, cap = child(b, m, side, cast, ep)
+        nb, ns, nc, ne = child(b, m, side, cast, ep)
         if attacked(nb, king_sq(nb, side), -side):
             continue
         legal += 1
-        v = -ab(nb, ns, nc, ne, depth - 1, -beta, -alpha, ply + 1)
+        index += 1
+        if static is not None and legal > 1 and not b[m[1]] and not m[2] and static + 180 <= alpha:
+            continue
+        searched += 1
+        if index > 3 and depth >= 3 and not in_check and not b[m[1]] and not m[2]:
+            red = 1 + (index > 8) + (depth > 6)
+            v = -ab(nb, ns, nc, ne, depth - 1 - red, -alpha - 1, -alpha, ply + 1, False)
+            if v > alpha:
+                v = -ab(nb, ns, nc, ne, depth - 1, -beta, -alpha, ply + 1, False)
+        else:
+            v = -ab(nb, ns, nc, ne, depth - 1, -beta, -alpha, ply + 1, False)
         if v > best:
             best = v
         if v > alpha:
             alpha = v
         if alpha >= beta:
+            if not b[m[1]] and not m[2]:
+                if KILL[ply][0] != m:
+                    KILL[ply][1] = KILL[ply][0]
+                    KILL[ply][0] = m
+                HIST[m[0]][m[1]] += depth * depth
             break
     if legal == 0:
-        return -MATE + ply if attacked(b, king_sq(b, side), -side) else 0
+        return -MATE + ply if in_check else 0
+    if searched == 0:
+        return static if static is not None else best
     return best
 
 
 def pick(fen, legal):
     global nodes
     nodes = 0
+    for row in HIST:
+        for i in range(64):
+            row[i] = 0
+    for k in KILL:
+        k[0] = k[1] = None
     b, side, cast, ep = parse(fen)
     roots = [from_uci(u) for u in legal]
     if not roots:
         return legal[0]
     best = roots[0]
-    for d in range(1, 6):
+    for d in range(1, 8):
         try:
             alpha = -MATE
             local = None
-            for m in order(b, list(roots)):
-                nb, ns, nc, ne, cap = child(b, m, side, cast, ep)
+            for m in order(b, list(roots), 0):
+                nb, ns, nc, ne = child(b, m, side, cast, ep)
                 if attacked(nb, king_sq(nb, side), -side):
                     continue
                 v = -ab(nb, ns, nc, ne, d - 1, -MATE, -alpha, 0)
@@ -372,7 +379,8 @@ def pick(fen, legal):
                 roots.insert(0, local)
         except Cut:
             break
-    return uci(best) if uci(best) in legal else legal[0]
+    out = uci(best)
+    return out if out in legal else legal[0]
 
 
 def post(url, path, body):
