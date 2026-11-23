@@ -1,6 +1,6 @@
 # tiny-chess-01 entry
 
-A 4 KB Python chess engine for the tiny-chess-01 bounty. `main.py` is the whole
+A 4 KB Python chess engine for the [tiny-chess-01 bounty](https://make.fun/bounty/tiny-chess-01) on [make.fun](https://make.fun). `main.py` is the whole
 engine: legal move generation, iterative-deepening alpha-beta, quiescence on
 captures, null-move pruning, late-move reductions, killer and history ordering,
 and a piece-square evaluation read from 448 packed bytes.
